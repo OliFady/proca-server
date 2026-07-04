@@ -16,37 +16,38 @@ defmodule Proca.Server.MTTScheduler do
 
   @impl true
   def init({target, max_emails_per_hour}) do
-    start_time = System.monotonic_time()
-
     Task.start(fn -> MTTContext.process_test_mails(target) end)
 
-    messages = MTTContext.get_pending_messages(target.id, max_emails_per_hour)
-
-    pending_count = Enum.count(messages)
-    stop_reason = if pending_count == 0, do: :no_messages, else: :sending
-
-    :telemetry.execute(
-      [:proca, :mtt_new, :scheduler, :start],
-      %{pending_count: pending_count},
-      %{
-        target_id: target.id,
-        campaign_id: target.campaign.id,
-        campaign_name: target.campaign.name
-      }
-    )
-
-    send(self(), {:send_message})
+    Process.send_after(self(), {:fetch_messages}, :rand.uniform(10_000))
 
     {:ok,
      %{
        target: target,
-       messages: messages,
+       max_emails_per_hour: max_emails_per_hour,
+       messages: [],
        jitter_toggle: true,
-       count: pending_count,
-       start_time: start_time,
+       count: 0,
+       start_time: System.monotonic_time(),
        sent_count: 0,
-       stop_reason: stop_reason
+       stop_reason: :sending
      }}
+  end
+
+  @impl true
+  def handle_info({:fetch_messages}, %{target: target, max_emails_per_hour: max_emails_per_hour} = state) do
+    messages = MTTContext.get_pending_messages(target.id, max_emails_per_hour)
+    pending_count = Enum.count(messages)
+
+    :telemetry.execute(
+      [:proca, :mtt_new, :scheduler, :start],
+      %{pending_count: pending_count},
+      %{target_id: target.id, campaign_id: target.campaign.id, campaign_name: target.campaign.name}
+    )
+
+    send(self(), {:send_message})
+
+    stop_reason = if pending_count == 0, do: :no_messages, else: :sending
+    {:noreply, %{state | messages: messages, count: pending_count, stop_reason: stop_reason}}
   end
 
   @impl true
